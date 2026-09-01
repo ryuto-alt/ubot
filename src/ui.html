@@ -1,0 +1,133 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>douga</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 20px; background: #16181d; color: #e6e8ec;
+         font: 14px/1.6 system-ui, "Segoe UI", sans-serif; max-width: 760px; }
+  h1 { font-size: 16px; margin: 0 0 14px; color: #9aa3b2; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; background: #22252c; color: #e6e8ec;
+         border: 1px solid #343945; border-radius: 6px; padding: 7px 12px; }
+  #url { flex: 1; min-width: 240px; }
+  button { cursor: pointer; }
+  button:hover { background: #2c313a; }
+  button.primary { background: #5865f2; border-color: #5865f2; }
+  button.primary:hover { background: #4752c4; }
+  button.danger { color: #f28b82; }
+  #bar { width: 100%; padding: 0; accent-color: #5865f2; }
+  #time { color: #9aa3b2; font-variant-numeric: tabular-nums; }
+  #title { font-weight: 600; margin-bottom: 2px; min-height: 1.6em; }
+  #status { color: #9aa3b2; min-height: 1.6em; }
+  ol { padding-left: 22px; color: #c3c8d1; }
+</style>
+
+<h1>douga — Go Live コントロール</h1>
+
+<div class="row">
+  <select id="vc"></select>
+  <button id="join" class="primary">VCに入る</button>
+  <button id="stop" class="danger">配信終了</button>
+</div>
+
+<div class="row">
+  <input id="url" placeholder="YouTubeのURL / 検索語" />
+  <button id="add" class="primary">再生 / 追加</button>
+</div>
+
+<div id="title"></div>
+<input id="bar" type="range" min="0" max="100" step="0.5" value="0" />
+
+<div class="row">
+  <button id="toggle">⏸</button>
+  <button id="back">⏪ 5秒</button>
+  <button id="fwd">5秒 ⏩</button>
+  <button id="next">次の動画 ⏭</button>
+  <span id="time">0:00 / 0:00</span>
+</div>
+
+<div id="status"></div>
+<ol id="queue"></ol>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let dragging = false;
+  let touched = false; // 自分でVCを選んだら自動選択で上書きしない
+
+  const post = (path, body) =>
+    fetch(path, { method: 'POST', body: JSON.stringify(body ?? {}) }).then((r) => r.json());
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  async function refresh() {
+    const st = await fetch('/state').then((r) => r.json());
+    const cur = st.current;
+    const dur = cur?.duration ?? 0;
+    $('title').textContent = cur?.title ?? '';
+    $('toggle').textContent = st.playing ? '⏸' : '▶';
+    $('time').textContent = `${fmt(st.position)} / ${fmt(dur)}`;
+    if (!dragging) {
+      $('bar').max = dur || 100;
+      $('bar').value = st.position;
+    }
+    $('status').textContent = cur
+      ? `素材 ${cur.info?.width}x${cur.info?.height}@${cur.info?.fps}fps → 送出 ${st.output?.height}p${Math.round(st.output?.fps)} / ${st.output?.kbps}kbps`
+      : st.vc ? `🔊 ${st.vc.name} に接続中 — URLを入れて再生` : 'VC未接続';
+    $('queue').innerHTML = st.queue.map((t) => `<li>${t.title}</li>`).join('');
+    if (!st.vc) loadChannels(); // 未接続の間は「今いるVC」を追い続ける
+  }
+
+  async function loadChannels() {
+    const { guilds, here } = await fetch('/channels').then((r) => r.json());
+    const html = guilds
+      .flatMap((g) => g.channels.map((c) => `<option value="${c.guildId}:${c.id}">${g.guild} / ${c.name}</option>`))
+      .join('');
+    const sel = $('vc');
+    if (sel.innerHTML !== html) {
+      const keep = sel.value; // 毎回作り直すと選択が既定に戻ってしまう
+      sel.innerHTML = html;
+      if (keep) sel.value = keep;
+    }
+    if (here && !touched) sel.value = `${here.guildId}:${here.channelId}`; // 自分が今いるVCを既定に
+  }
+
+  $('vc').onchange = () => (touched = true);
+  $('join').onclick = async () => {
+    const [guildId, channelId] = $('vc').value.split(':');
+    $('status').textContent = '接続中…';
+    const r = await post('/join', { guildId, channelId });
+    if (r.error) $('status').textContent = r.error;
+    refresh();
+  };
+  $('add').onclick = async () => {
+    const url = $('url').value.trim();
+    if (!url) return;
+    $('status').textContent = '準備中…（ダウンロード）';
+    const r = await post('/play', { url });
+    $('url').value = '';
+    if (r.error) $('status').textContent = r.error;
+    refresh();
+  };
+  // falseを返すとキー入力ごとキャンセルされる(=貼り付けも効かなくなる)ので値を返さない
+  $('url').onkeydown = (e) => {
+    if (e.key === 'Enter') $('add').click();
+  };
+
+  $('bar').oninput = () => {
+    dragging = true;
+    $('time').textContent = `${fmt(+$('bar').value)} / ${fmt(+$('bar').max)}`;
+  };
+  $('bar').onchange = async () => {
+    await post('/seek', { t: +$('bar').value });
+    dragging = false;
+    refresh();
+  };
+  $('toggle').onclick = () => post($('toggle').textContent === '⏸' ? '/pause' : '/resume').then(refresh);
+  $('back').onclick = () => post('/seek', { t: Math.max(0, +$('bar').value - 5) }).then(refresh);
+  $('fwd').onclick = () => post('/seek', { t: +$('bar').value + 5 }).then(refresh);
+  $('next').onclick = () => post('/next').then(refresh);
+  $('stop').onclick = () => post('/stop').then(refresh);
+
+  loadChannels();
+  refresh();
+  setInterval(refresh, 1000);
+</script>

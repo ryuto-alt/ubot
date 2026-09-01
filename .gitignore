@@ -1,0 +1,11 @@
+node_modules/
+.env
+data/
+inspect.js
+
+gptsol-prompt.txt
+gptsol-usage.json
+gptsol-model.json
+gptsol-prompt2.txt
+gptsol-prompt3.txt
+logs/
